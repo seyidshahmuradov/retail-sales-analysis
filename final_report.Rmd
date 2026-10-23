@@ -1,0 +1,505 @@
+---
+title: "Retail Sales Analysis"
+author: "Seyidshah Muradov"
+date: "`r Sys.Date()`"
+output: 
+      html_document:
+        toc: true
+        toc_float: true
+---
+
+### Setup
+
+```{r setup, echo=TRUE,error=FALSE,message=FALSE,warning=FALSE}
+
+pacman::p_load(data.table,dplyr,readxl, tidyr, writexl,readr,lubridate,xlsx,httr,stringr,jsonlite,ssh,stringdist,reshape2,plotly,
+             lubridate, DT ,kableExtra,shiny,shinythemes,shinydashboard,shinyWidgets,knitr,rmarkdown,evaluate,base64enc,digest,highr,htmltools,xfun,yaml,mime)
+
+
+```
+
+
+## Data Cleaning and Join
+
+```{r t1, echo=TRUE,error=FALSE,message=FALSE,warning=FALSE}
+
+# TABLES
+fp_receipts = readRDS("data/fp_receipts.rds")
+fp_map = readRDS("data/fp_map.rds")
+
+#DATA CLEANING FUNCTIONS
+clean_product <- function(x) {
+  x <- gsub("\\?", "Ə", x)
+  x <- toupper(x)
+  
+  x <- gsub("([0-9]+),([0-9]+)", "\\1.\\2", x)
+  
+  x <- gsub("(?<=\\d)\\.(?=\\d)", "DECIMALPOINT", x, perl = TRUE)
+  
+  x <- gsub("[[:punct:]]", " ", x)
+  
+  x <- gsub("DECIMALPOINT", ".", x)
+  
+  x <- chartr("ƏŞİÖÜÇĞ", "ESIOUCG", x)
+  
+  x <- gsub("\\bKG[S]*\\b", " KQ", x)
+  x <- gsub("\\b(KGR|KGS)\\b", " KQ", x)
+  x <- gsub("\\b(GR|G)\\b", " QR", x)
+  x <- gsub("\\b(LT|LITR|LTR)\\b", " LT", x)
+  x <- gsub("\\b(ML)\\b", " ML", x)
+  
+  x <- gsub("X([0-9]+)", "\\1 EDED", x) 
+  x <- gsub("\\*([0-9]+)", "\\1 EDED", x)
+  x <- gsub("([0-9]+)\\s*(PCS|ADET|ƏDƏD|ED|EDED)", "\\1 EDED", x)
+
+  x <- gsub("\\.0\\b", "", x)
+  
+  x <- gsub("\\s+", " ", x)
+  x <- trimws(x)
+  
+  return(x)
+}
+
+clean_pos <- function(x) {
+  
+  x <- gsub("\\?", "Ə", x)
+  x <- toupper(x)
+  x <- gsub("[[:punct:]]", " ", x)
+  x <- chartr("ƏŞİÖÜÇĞ", "ESIOUCG", x)
+  x <- gsub("\\s+", " ", x)
+  x <- trimws(x)
+  
+  return(x)
+}
+
+
+# RECEIPTS CLEANING
+fp_receipts[, product_clean := clean_product(product_name)]
+fp_receipts[, pos_clean := clean_pos(pos)]
+fp_receipts[, rec_date_period := as.numeric(format(as.Date(rec_date, "%m/%d/%Y"), "%Y%m"))]
+
+# MAP CLEANING
+fp_map[, product_clean := clean_product(product)]
+
+# JOIN
+setkey(fp_receipts, product_clean, rec_date_period)
+setkey(fp_map, product_clean, period)
+full_tab <- fp_map[fp_receipts, nomatch = 0]
+
+# REC_ID CLEANING
+full_tab[, rec_id := gsub("\\?", "Ə", rec_id)]
+full_tab[, rec_id := gsub("[^A-Z0-9_]", "", rec_id)]
+full_tab[, rec_id := gsub(" ", "", rec_id)]
+
+full_tab[grepl("BRAVO", pos_clean), rec_id := sub("^[A-Z]+", "BRA", rec_id)]
+full_tab[grepl("OBA", pos_clean), rec_id := sub("^[A-Z]+", "OBA", rec_id)]
+full_tab[grepl("ARAZ", pos_clean), rec_id := sub("^[A-Z]+", "ARA", rec_id)]
+full_tab[grepl("BAZARSTORE", pos_clean), rec_id := sub("^[A-Z]+", "BAZ", rec_id)]
+full_tab[grepl("RAHAT", pos_clean), rec_id := sub("^[A-Z]+", "RAH", rec_id)]
+full_tab[grepl("BIZIM", pos_clean) | grepl("BİZİM", pos_clean), rec_id := sub("^[A-Z]+", "BIZ", rec_id)]
+full_tab[grepl("MEGASTORE", pos_clean), rec_id := sub("^[A-Z]+", "MEG", rec_id)]
+
+full_tab[, rec_id := toupper(rec_id)]
+
+
+full_tab[, c("product", "product_name", "pos") := NULL]
+setnames(full_tab, "product_clean", "product")
+setnames(full_tab, "pos_clean", "pos")
+
+full_tab[, total_sales := qnt * unit_price]
+full_tab[, profit := round(total_sales * profit_margin, 2)]
+
+```
+
+
+## 1. Deskriptiv Tehlil
+> 1.1 Data Description
+
+```{r t2, echo=TRUE,error=FALSE,message=FALSE,warning=FALSE}
+
+# Receipts datasi
+receipts = readRDS("data/fp_receipts.rds")
+
+dim(receipts)
+str(receipts)
+names(receipts)
+length(unique(receipts$pos))
+length(unique(receipts$product_name))
+length(unique(receipts$rec_id))
+
+
+# Map datasi
+map = readRDS("data/fp_map.rds")
+
+dim(map)
+str(map)
+names(map)
+unique(map$product_type)
+length(unique(map$product))
+
+
+# Full_tab (Join olunmush) datasi
+dim(full_tab)
+str(full_tab)
+names(full_tab)
+length(unique(full_tab$product))
+length(unique(full_tab$pos))
+
+```
+
+**Şərh (Receipts datası)**: Datasetdə ümumilikdə 10,000,909 sətr və 6 sütun mövcuddur ki, bu da məlumat bazasının olduqca iri həcmli satış əməliyyatlarını əhatə etdiyini göstərir. Buradakı sütunlar satış nöqtəsini və ya mağaza adını (pos), satış tarixini (rec_date), unikal qəbz identifikatorunu (rec_id), məhsulun adını (product_name), alınan məhsulun miqdarını (qnt) və vahid qiymətini (unit_price) özündə cəmləşdirir. Datasetdə 6,596 unikal satış nöqtəsi qeydə alınıb ki, bu da geniş mağaza şəbəkəsinin olduğunu göstərir və müxtəlif marketlər üzrə satışların müqayisəli analizinə imkan yaradır. Məhsul adlarının sayı isə 675,881-dir ki, bu da çox geniş çeşidli məhsul portfelini əks etdirir və təhlil prosesində normalizasiya və qruplaşdırma ehtiyacını ön plana çıxarır. Rec_id sütununda 10,000,909 unikal qəbz qeyd olunub və bu da göstərir ki, datasetdə hər bir sətir ayrı-ayrı satış əməliyyatını ifadə edir. Ümumilikdə, receipts datası satışların həm mağaza, həm də məhsul səviyyəsində detallı izlənməsinə imkan yaradır, lakin məhsul və satış nöqtələrinin müxtəlifliyi səbəbindən ilkin təmizləmə (cleaning) prosesi mütləq tələb olunur.
+
+**Şərh (Map datası)**: Map datasetində ümumilikdə 118,118 sətr və 4 sütun mövcuddur. Bu məlumat bazası məhsullar haqqında referans məlumatları özündə birləşdirir və satış əməliyyatlarının daha geniş analizi üçün receipts datası ilə birgə istifadə olunur. Datasetdəki əsas sütunlar period (202403, 202404 və s. şəklində dövr göstəricisi), product_type (məhsulun qida və ya qeyri-qida olmasını göstərir), product (məhsulun adı) və profit_margin (məhsul üzrə mənfəət marjası) sütunlarıdır. Product_type sütununda cəmi iki unikal dəyər mövcuddur – FOOD və NON-FOOD, yəni məhsullar əsasən bu iki əsas kateqoriyaya ayrılıb. Datasetdə 46,528 unikal məhsul adı qeydə alınıb ki, bu da bazarın geniş məhsul portfelini əks etdirir. Profit_margin sütunu isə hər bir məhsul üzrə mənfəət payını göstərir və maliyyə analizi üçün mühüm əhəmiyyət daşıyır. Ümumilikdə, map datası məhsulların təsnifatını və mənfəət göstəricilərini təqdim edərək receipts məlumatlarını daha zənginləşdirir və təhlil prosesində zəruri dəstəyi təmin edir.
+
+**Şərh (Full_tab (Join olunmush) datası)**: Full_tab datasetində ümumilikdə 640,815 sətr və 11 sütun mövcuddur. Bu dataset receipts və map məlumatlarının təmizlənməsi və birləşdirilməsi nəticəsində formalaşdırılmış əsas işçi bazadır. Əsas sütunlar arasında period (tarixdən çıxarılan dövr göstəricisi), product_type (məhsulun FOOD və ya NON-FOOD kateqoriyasında olması), profit_margin (məhsul üzrə mənfəət marjası), product (məhsulun adı), rec_date (satış tarixi), rec_id (qəbz identifikatoru), qnt (satılan miqdar), unit_price (vahid qiymət), pos (satış nöqtəsi), total_sales (satış məbləği = qnt × unit_price) və profit (mənfəət = total_sales × profit_margin) mövcuddur.
+Datasetdə ümumilikdə 43,091 unikal məhsul və 969 unikal satış nöqtəsi qeydə alınmışdır. Bu isə göstərir ki, cleaning və mapping nəticəsində məhsulların sayı xeyli azalib, ama daha idarəolunan formadadir.
+Ümumilikdə, full_tab datası satış, məhsul və mağaza məlumatlarını vahid platformada təqdim edir və həm deskriptiv təhlil, həm də proqnozlaşdırma mərhələləri üçün etibarlı baza rolunu oynayır.
+
+> 1.2 Melumat Heddlerinin Xulasesi
+
+```{r t3, echo=TRUE,error=FALSE,message=FALSE,warning=FALSE}
+
+# Total Sales üzrə xülasə
+sales_summary <- full_tab %>%
+  summarise(
+    Min = round(min(total_sales, na.rm = TRUE), 2),
+    Q1 = round(quantile(total_sales, 0.25, na.rm = TRUE), 2),
+    Median = round(median(total_sales, na.rm = TRUE), 2),
+    Ortalama = round(mean(total_sales, na.rm = TRUE), 2),
+    Q3 = round(quantile(total_sales, 0.75, na.rm = TRUE), 2),
+    Maks = round(max(total_sales, na.rm = TRUE), 2),
+    Standart_Sapma = round(sd(total_sales, na.rm = TRUE), 2)
+  ) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "Tendensiya_Deyerleri",
+    values_to = "Deyer"
+  )
+
+datatable(sales_summary)
+
+# Profit üzrə xülasə
+profit_summary <- full_tab %>%
+  summarise(
+    Min = round(min(profit, na.rm = TRUE), 2),
+    Q1 = round(quantile(profit, 0.25, na.rm = TRUE), 2),
+    Median = round(median(profit, na.rm = TRUE), 2),
+    Ortalama = round(mean(profit, na.rm = TRUE), 2),
+    Q3 = round(quantile(profit, 0.75, na.rm = TRUE), 2),
+    Maks = round(max(profit, na.rm = TRUE), 2),
+    Standart_Sapma = round(sd(profit, na.rm = TRUE), 2)
+  ) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "Tendensiya_Deyerleri",
+    values_to = "Deyer"
+  )
+
+datatable(profit_summary)
+
+```
+
+**Sherh (Sales_summary)**: Satış məbləğinin minimum dəyəri 1.72 AZN olmuşdur ki, bu da əsasən ucuz və az miqdarda alınan məhsulları əks etdirir. Q1 göstəricisi 4.60 AZN-dir, yəni satışların 25%-i bu məbləğdən aşağı həcmdədir. Median dəyər 6.32 AZN təşkil edir və satışların yarısı bu qiymətdən aşağı, yarısı isə yuxarıdır. Orta satış məbləği 7.66 AZN-dir ki, bu da medianla yaxın nəticədir və satışların ümumi olaraq balanslı paylandığını göstərir. Q3 göstəricisi 8.28 AZN olduğu üçün satışların 75%-i bu həddən aşağıdır. Maksimum satış məbləği isə 3000 AZN-dir və bu, tipik əməliyyatlardan xeyli kənara çıxır, yəni böyük ehtimalla iri həcmli və ya xüsusi məhsul alışı ilə bağlıdır. Standart sapma 11.73 olaraq qeydə alınıb ki, bu da satışlarda müəyyən dəyişkənliyin mövcud olduğunu göstərir. Ümumilikdə, satışların böyük əksəriyyəti 2–10 AZN intervalında cəmləşsə də, bəzi iri əməliyyatlar səbəbindən maksimum dəyərdə çox yüksək fərqlər müşahidə olunur və bu nəticələr potensial outlierlərə işarə edir.
+
+**Sherh (Profit Summary)**: Mənfəətin minimum dəyəri -76.16 AZN olaraq qeydə alınıb ki, bu da bəzi əməliyyatlarda zərər (məsələn, endirimlər və ya səhv qiymətləndirmə) olduğunu göstərir. Q1 göstəricisi 0.86 AZN-dir, yəni mənfəətin 25%-i bu dəyərdən aşağıdır. Median 1.25 AZN təşkil edir, yəni əməliyyatların yarısında mənfəət bu rəqəmdən az, digər yarısında isə çoxdur. Ortalama dəyər 1.72 AZN-dir və medianla yaxın nəticə göstərir, bu da mənfəətin əsasən kiçik diapazonda paylandığını sübut edir. Q3 göstəricisi 1.82 AZN olaraq qeydə alınıb və bu da mənfəətin 75%-nin nisbətən dar intervalda toplandığını göstərir. Maksimum mənfəət 1120.67 AZN olub ki, bu, adi əməliyyatlardan xeyli kənara çıxır və böyük həcmli satışlar və ya yüksək marjlı məhsullarla bağlı ola bilər. Standart sapma 3.28-dir, bu isə mənfəətdə orta səviyyəli dəyişkənliyin mövcudluğunu göstərir. Ümumilikdə, mənfəət dəyərləri əsasən 0.8 – 2 AZN intervalında cəmləşsə də, bəzi zərərli əməliyyatlar və iri həcmli satışlar səbəbindən həm mənfi, həm də çox yüksək dəyərlər müşahidə olunur ki, bunlar potensial anomaliyalar kimi nəzərdən keçirilməlidir.
+
+> 1.3 Dagilimlar
+
+```{r t4, echo=TRUE,error=FALSE,message=FALSE,warning=FALSE}
+
+sales_dagilim = full_tab %>%
+  summarise(
+    min = min(total_sales, na.rm = TRUE),
+    Q1 = quantile(total_sales, 0.25, na.rm = TRUE),
+    median = median(total_sales, na.rm = TRUE),
+    mean = round(mean(total_sales, na.rm = TRUE), 2),
+    Q3 = quantile(total_sales, 0.75, na.rm = TRUE)
+  )
+
+plot_ly(
+  data = sales_dagilim,
+  type = 'box',
+  lowerfence = ~min,
+  q1 = ~Q1,
+  median = ~median,
+  q3 = ~Q3,
+  upperfence = ~Q3 + 1.5 * (Q3 - Q1),
+  name = "Total Sales"
+) %>%
+  layout(title = "Total Sales Dağılımı",
+         yaxis = list(title = "Total Sales Dəyərləri"))
+
+
+profit_dagilim = full_tab %>%
+  summarise(
+    Q1 = quantile(profit, 0.25, na.rm = TRUE),
+    median = median(profit, na.rm = TRUE),
+    mean = round(mean(profit, na.rm = TRUE), 2),
+    Q3 = quantile(profit, 0.75, na.rm = TRUE),
+    IQR = IQR(profit, na.rm = TRUE),
+    lowerfence = Q1 - 1.5 * IQR,
+    upperfence = Q3 + 1.5 * IQR,
+    min_val = min(profit, na.rm = TRUE),
+    max_val = max(profit, na.rm = TRUE)
+  )
+
+plot_ly(
+  data = profit_dagilim,
+  type = 'box',
+  q1 = ~Q1,
+  median = ~median,
+  q3 = ~Q3,
+  lowerfence = ~lowerfence,
+  upperfence = ~upperfence,
+  name = "Profit"
+) %>%
+  layout(
+    title = "Profit Dağılımı",
+    yaxis = list(title = "Profit Dəyərləri")
+  )
+
+```
+
+**Qeyd**: Burda boxplot dəyərlərinin manual hesablanması seçildi. Bunun əsas səbəbi ggplot istifadə edərkən çoxsaylı outlier dəyərlərinin vizuallaşdırmanı pozmasıdır. Çünki dataset çox böyükdür və çıxıntılı (ekstremal) dəyərlərin sayı kifayət qədərdir. Nəticədə qrafikdə əsas kvartillər və medianın təhlili çətinləşirdi.
+Manual yanaşma ilə isə Q1, Median, Q3 və s. əsas tendensiya göstəriciləri ayrıca hesablanaraq boxplot quruldu. Bu metod bizə məlumatın əsas mərkəzi paylanmasını aydın şəkildə göstərməyə imkan verdi.
+
+**Sherh (Total Sales Dağılımı)**: Total Sales göstəricisinin boxplot analizi göstərir ki, satışların minimum dəyəri 1.72, medianı isə 6.32-dir. Bu o deməkdir ki, satışların yarısı 6.32 vahiddən aşağı, digər yarısı isə bu dəyərdən yuxarıdır. Orta (mean) dəyər isə 7.66 olaraq medianla yaxın nəticə göstərir və paylanmanın ümumilikdə simmetrik olduğunu göstərir.
+Q1 4.60, Q3 isə 8.27-dir. Bu aralıq (IQR ≈ 3.67) satışların böyük hissəsinin 4.6 ilə 8.3 arasında cəmləşdiyini göstərir. Maksimum dəyər 13.80 olaraq çıxır ki, bu da orta satış səviyyəsindən xeyli yuxarı olsa da, kəskin uçurum yaratmır.
+Ümumilikdə nəticələr göstərir ki, satış dəyərləri stabil və dar bir intervalda toplanıb. Yüksək satış göstəriciləri müəyyən mağazalar və ya məhsul kateqoriyalarına aid ola bilər, lakin ciddi ekstremal dəyərlər müşahidə olunmur.
+
+**Sherh (Profit Dağılımı)**: Profit dəyərlərinin boxplot analizi göstərir ki, mənfi və müsbət dəyərlər mövcuddur. Minimum profit təxminən -0.58, maksimum isə 3.26 olmuşdur. Q1 dəyəri 0.86, median 1.25, Q3 isə 1.82-dir. Bu nəticələr göstərir ki, ümumi əməliyyatların böyük əksəriyyəti kiçik profit aralığında cəmlənmişdir.
+Eyni zamanda minimum göstəricinin mənfi olması zərərlə nəticələnən satış əməliyyatlarının mövcud olduğunu göstərir. Üst kvartilin (Q3) üzərində müəyyən fərqlər olsa da, çox kəskin outlier-lər müşahidə olunmur. Bu isə datasetdəki profit göstəricilərinin daha sabit və dar diapazonda toplandığını göstərir.
+Nəticə olaraq, profit dəyərlərinin əsas hissəsi 0.8–1.8 intervalında yerləşir və medianın 1.25 olması satışların çoxunda nisbətən az miqdarda mənfəət əldə olunduğunu göstərir. Mənfi dəyərlərin olması isə müəyyən məhsul və ya mağazalarda zərər ehtimalına işarədir.
+
+> 1.4 Elave melumat heddleri
+
+```{r elave, echo=TRUE,error=FALSE,message=FALSE,warning=FALSE}
+
+min(receipts$rec_date)
+max(receipts$rec_date)
+mean(receipts$qnt)
+mean(fp_receipts$total_sales)
+
+summary(fp_map$profit_margin)
+quantile(fp_map$profit_margin, probs = 1:10/10, na.rm = TRUE)
+
+# Minimum profit margin olan məhsul(lar)
+min_margin_product <- fp_map %>%
+  filter(profit_margin == min(profit_margin, na.rm = TRUE)) %>%
+  select(product, product_type, period, profit_margin)
+
+# Maksimum profit margin olan məhsul(lar)
+max_margin_product <- fp_map %>%
+  filter(profit_margin == max(profit_margin, na.rm = TRUE)) %>%
+  select(product, product_type, period, profit_margin)
+
+# fp_receipts datasına total_sales əlavə et
+fp_receipts <- fp_receipts %>%
+  mutate(total_sales = qnt * unit_price)
+
+# fp_receipts-də ən yüksək gəlir gətirən qəbz 
+max_sales_receipt_fp <- fp_receipts %>%
+  filter(total_sales == max(total_sales, na.rm = TRUE)) %>%
+  select(rec_id, pos, rec_date, product_name, qnt, unit_price, total_sales)
+
+# full_tab-da ən yüksək gəlir gətirən qəbz 
+max_sales_receipt_full <- full_tab %>%
+  filter(total_sales == max(total_sales, na.rm = TRUE)) %>%
+  select(rec_id, pos, rec_date, product, qnt, unit_price, total_sales, profit)
+
+# full_tab-da ən yüksək mənfəət gətirən qəbz
+max_profit_receipt_full <- full_tab %>%
+  filter(profit == max(profit, na.rm = TRUE)) %>%
+  select(rec_id, pos, rec_date, product, qnt, unit_price, total_sales, profit, profit_margin)
+
+# Nəticələri göstərmək üçün cədvəl
+datatable(min_margin_product, caption = "Minimum Profit Margin olan mehsul(lar)")
+datatable(max_margin_product, caption = "Maksimum Profit Margin olan mehsul(lar)")
+datatable(max_sales_receipt_fp, caption = "En yuksek gelir (sales) getiren qebz - Receipts")
+datatable(max_sales_receipt_full, caption = "En yuksek gelir (sales) getiren qebz - Full Tab")
+datatable(max_profit_receipt_full, caption = "En yuksek menfeet (profit) getiren qebz - Full Tab")
+
+
+```
+
+## 2. Anomaliyalar 
+> 2.1 Həftənin günlərinə görə satış və mənfəət
+
+```{r t5, echo=TRUE,error=FALSE,message=FALSE,warning=FALSE}
+
+full_tab[, day_of_week := weekdays(rec_date)]
+
+anom_day <- full_tab %>%
+  group_by(day_of_week) %>%
+  summarise(
+    total_sales = round(sum(total_sales, na.rm = TRUE),2),
+    total_profit = sum(profit, na.rm = TRUE)
+  ) %>%
+  arrange(desc(total_sales))
+
+datatable(anom_day)
+
+plot_ly(anom_day, x = ~day_of_week, y = ~total_sales, type = "bar", name = "Total Sales") %>%
+  add_trace(y = ~total_profit, name = "Profit") %>%
+  layout(title = "Heftenin gunlerine gore satish ve menfeet",
+         yaxis = list(title = "Mebleg"))
+
+```
+
+**Sherh (Həftənin günlərinə görə satış və mənfəət)**:
+Analiz nəticəsində satışların həftənin günlərinə görə bölgüsü göstərdi ki, ən yüksək satış cümə günü (Friday) qeydə alınıb – 1,700,859.25 AZN. Bu məbləğ digər günlərin satış həcmlərindən kəskin şəkildə yüksəkdir və ümumi satışların böyük hissəsini özündə cəmləşdirir.
+
+Ümumiyyətlə, bazar (Sunday) və şənbə (Saturday) günlərində satışların daha çox olması gözlənilən haldır, çünki istirahət günlərində alış-veriş fəallığı artır. Amma nəticələr göstərir ki, cümə günü satış həcminin digər günləri xeyli üstələməsi qeyri-adi bir tendensiyadır və anomaliya hesab oluna bilər. Bu hal, ya həmin günlərdə xüsusi aksiyaların keçirilməsi, ya da maaş/ödəniş günləri ilə əlaqədar alış-verişin daha çox olması ilə izah oluna bilər.
+
+Mənfəət göstəricilərinə də baxdıqda, eyni tendensiya müşahidə olunur – cümə günü mənfəət (383,216.77 AZN) digərlərindən çox yuxarıdır. Bu isə göstərir ki, satış artımı sadəcə dövriyyədə deyil, həm də gəlirdə özünü göstərib.
+
+Nəticə: Həftənin digər günlərində satış və mənfəət nisbətən balanslı paylandığı halda, cümə gününün kəskin üstünlüyü diqqətçəkici anomaliyadır. Bunun səbəblərinin daha dərin təhlili (kampaniyalar, müştəri davranışı, əməkhaqqı günləri və s.) aparılmalıdır.
+
+> 2.2 POS üzrə Top 5 satış və mənfəət
+
+```{r t6, echo=TRUE,error=FALSE,message=FALSE,warning=FALSE}
+
+tab_pos <- full_tab %>%
+  mutate(
+    pos_temiz = case_when(
+      str_detect(tolower(pos), "araz") ~ "ARAZ MARKET",
+      str_detect(tolower(pos), "oba") ~ "OBA MARKET",
+      str_detect(tolower(pos), "bravo") ~ "BRAVO",
+      str_detect(tolower(pos), "bazarstore") ~ "BAZARSTORE",
+      str_detect(tolower(pos), "bizim") ~ "BIZIM MARKET",
+      str_detect(tolower(pos), "spar") ~ "SPAR MARKET",
+      str_detect(tolower(pos), "megastore") ~ "MEGASTORE",
+      str_detect(tolower(pos), "rahat") ~ "RAHAT MARKET",
+      str_detect(tolower(pos), "ermagaza|ərzaq mağazası|erzaq") ~ "ƏRZAQ MAĞAZASI",
+      TRUE ~ "DIGER"
+    )
+  )
+
+anom_pos <- tab_pos %>%
+  group_by(pos_temiz) %>%
+  summarise(
+    total_sales = round(sum(total_sales, na.rm = TRUE),2),
+    total_profit = sum(profit, na.rm = TRUE)
+  ) %>%
+  arrange(desc(total_sales)) %>%
+  head(5)
+
+datatable(anom_pos)
+
+plot_ly(anom_pos, x = ~pos_temiz, y = ~total_sales, type = "bar", name = "Total Sales") %>%
+  add_trace(y = ~total_profit, name = "Profit") %>%
+  layout(title = "Top 5 POS uzre satish ve menfeet",
+         yaxis = list(title = "Mebleg"))
+
+
+```
+
+**Sherh (POS-lara görə satış və mənfəət)**: POS (satış nöqtəsi) üzrə təhlil göstərdi ki, BRAVO marketlər şəbəkəsi digər bütün satış nöqtələrindən kəskin şəkildə irəlidədir. BRAVO üzrə ümumi satış həcmi 2,225,313.38 AZN, mənfəət isə 541,378.97 AZN olmuşdur. Bu göstərici digər POS-larla müqayisədə çox yüksəkdir.
+Məsələn, ikinci yerdə gələn OBA MARKET-in satış həcmi 947,799.74 AZN, mənfəəti isə 172,825.73 AZN təşkil edir. BRAVO ilə OBA arasında demək olar ki, 2 dəfədən çox fərq var. Digər POS-lar isə daha aşağı nəticələr göstərir: ARAZ MARKET 680,426.89 AZN, BAZARSTORE 346,240.71 AZN.
+Anomaliya: Bu vəziyyətdə BRAVO-nun satış və mənfəət göstəricilərinin digərlərindən çox böyük fərqlə üstün olması diqqətçəkicidir. Normal şərtlərdə top POS-lar arasında nisbətən daha balanslı paylanma gözlənilsə də, burada BRAVO-nun kəskin dominantlığı müşahidə olunur. Bu ya BRAVO şəbəkəsinin çox geniş filial bazasına sahib olması, ya da həmin POS-un məlumatlarının digərlərindən fərqli şəkildə qeydə alınması ilə bağlı ola bilər.
+Nəticə: BRAVO POS-un bu qədər yüksək fərqlə öndə olması potensial anomaliya kimi qiymətləndirilə bilər. Bu vəziyyət daha dərin təhlil tələb edir: məsələn, BRAVO-dakı satışların bütün şəbəkə üzrə toplanması, xüsusi kampaniyalar və ya data entry fərqləri səbəb ola bilər.
+
+> 2.3 Tarixlər üzrə Receipt sayi, satış və mənfəət
+
+```{r t7, echo=TRUE,error=FALSE,message=FALSE,warning=FALSE}
+
+anom_date <- full_tab %>%
+  group_by(rec_date) %>%
+  summarise(
+    receipt_sayi = n_distinct(rec_id),
+    total_sales = round(sum(total_sales, na.rm = TRUE), 2),
+    total_profit = round(sum(profit, na.rm = TRUE), 2)
+  ) %>%
+  arrange(-receipt_sayi)
+
+datatable(anom_date)
+
+```
+
+**Sherh**: Təhlil göstərir ki, satış və mənfəət göstəriciləri günlər üzrə bərabər paylanmır. Ən yüksək göstəricilər 2024-04-19 tarixində qeydə alınıb – bu gün 142,612 qəbz (receipt) emal olunub, ümumi satış məbləği 1,148,217 AZN, mənfəət isə 259,166 AZN təşkil edib. Bu rəqəmlər digər günlərdən xeyli fərqlənir və açıq şəkildə anomaliya xarakteri daşıyır. Digər günlərdə isə satış və mənfəət göstəriciləri xeyli aşağı, nisbətən sabit diapazonda dəyişir (təxminən 15–25 min qəbz aralığında).
+Nəticə: Bu kəskin sıçrayış təsadüfi deyil. Çünki məlum olduğu kimi, datasetin başlanğıcı 19 aprel 2024 tarixindən başlayır, amma map datasında period 202403, 202404 ve 202405 (Mart, Aprel, May ayı) olaraq göstərilib. Bu isə o ehtimalı gücləndirir ki, mart ayına və aprelin ilk yarısına aid satışlar toplu şəkildə 19 aprel tarixinə yazılıb. Ona görə də bu tarixdə satış və mənfəət göstəriciləri qeyri-adi dərəcədə yüksək çıxıb. Bu vəziyyət məlumatların toplanması metodundan irəli gələn texniki anomaliya hesab edilə bilər.
+
+## Proqnoz ve Ferziyyeler
+
+> Regressiya Modeli və Təhlil
+
+```{r t8, echo=TRUE,error=FALSE,message=FALSE,warning=FALSE}
+
+model_profit <- lm(profit ~ total_sales + profit_margin, data = full_tab)
+
+summary(model_profit)
+
+full_tab$pred_profit <- predict(model_profit, newdata = full_tab)
+full_tab$pred_profit <- round(full_tab$pred_profit, 2)
+
+datatable(full_tab)
+
+
+full_tab <- full_tab %>%
+  mutate(
+    profit_cat = case_when(
+      profit <= 0.8 ~ "1. ...<=0.8",
+      profit > 0.8 & profit <= 1.25 ~ "2. 0.8>=1.25",
+      profit > 1.25 & profit <= 2 ~ "3. 1.25>=2",
+      profit > 2 & profit <= 3 ~ "4. 2>=3",
+      profit > 3 ~ "5. 3<..."
+    ),
+    pred_profit_cat = case_when(
+      pred_profit <= 0.8 ~ "1. ...<=0.8",
+      pred_profit > 0.8 & pred_profit <= 1.25 ~ "2. 0.8>=1.25",
+      pred_profit > 1.25 & pred_profit <= 2 ~ "3. 1.25>=2",
+      pred_profit > 2 & pred_profit <= 3 ~ "4. 2>=3",
+      pred_profit > 3 ~ "5. 3<..."
+    )
+  )
+
+
+profit_compare <- dcast(
+  full_tab,
+  profit_cat ~ pred_profit_cat,
+  value.var = "rec_id",
+  fun.aggregate = length
+)
+
+datatable(profit_compare)
+
+```
+
+**Sherh**: Qurulan modeldə profit dəyişəni total_sales və profit_margin üzərindən proqnozlaşdırılıb. Bu seçim məntiqlidir, çünki mənfəət birbaşa satış həcmi və marja ilə müəyyən olunur. Modelin nəticələri göstərir ki, izah gücü kifayət qədər yüksəkdir: R² = 0.8005, yəni mənfəətin dəyişkənliyinin 80%-i satış və marja ilə izah oluna bilir. Əmsallar da statistik olaraq yüksək əhəmiyyətə malikdir. Total_sales əmsalı 0.238 olub, satışların artmasının mənfəəti müsbət istiqamətdə təsirləndirdiyini göstərir. Profit_margin əmsalı isə 7.73 çıxıb ki, bu da mənfəət marjasının kiçik dəyişməsinin belə mənfəətdə ciddi təsir yaratdığını sübut edir.
+Qalıqların median və IQR dəyərləri sıfıra yaxın olub, bu isə modelin balanslı işlədiyini göstərir. Bununla yanaşı, bəzi ekstremal hallarda mənfi və ya çox yüksək fərqlər müşahidə olunur ki, bu da datasetdəki outlier əməliyyatlarla bağlıdır.
+Kateqoriyalara bölünmüş müqayisə cədvəli isə modelin performansını daha aydın göstərir. Əsasən orta seqmentlərdə (1.25–2 AZN aralığında) proqnozlar real dəyərlərlə uyğunluq göstərir. Lakin aşağı seqmentdə (<0.8) model proqnozları real paylanmadan fərqlənir. Yüksək seqmentlərdə (>3) isə modelin ehtiyatlı yanaşdığı görünür – proqnozlar məhduddur, halbuki real dəyərlərdə daha kəskin sıçrayışlar mövcuddur.
+Ümumilikdə, model mənfəətin proqnozlaşdırılması üçün etibarlı nəticələr verir və xüsusilə orta seqmentlərdə yaxşı işləyir. Aşağı mənfəətli və ekstremal əməliyyatlarda proqnoz gücü zəifləyir, bu da outlier təsiri ilə bağlıdır. Nəticə olaraq, model praktikada satış və marja dəyişikliklərinin mənfəətə təsirini qiymətləndirmək və gələcək trend barədə ilkin fərziyyələr qurmaq üçün uyğundur.
+
+> Total Sales və Profit arasındakı əlaqə
+
+```{r t9, echo=TRUE,error=FALSE,message=FALSE,warning=FALSE}
+
+p <- ggplot(full_tab, aes(x = total_sales, y = profit)) +
+  geom_point(color = "steelblue") +
+  geom_smooth(method = "lm", color = "red", se = FALSE) +
+  labs(
+    title = "Total Sales və Profit arasındakı əlaqə",
+    x = "Total Sales",
+    y = "Profit"
+  )
+
+p
+
+cor(full_tab$total_sales, full_tab$profit)
+
+```
+
+**Sherh**: Aparılan scatter plot təhlili göstərdi ki, ümumi satışlar (Total Sales) ilə mənfəət (Profit) arasında güclü müsbət əlaqə mövcuddur. Qrafikdə nöqtələrin böyük əksəriyyəti müsbət istiqamətdə sıralanıb və xətti trend (qırmızı xətt) bunu açıq şəkildə nümayiş etdirir.
+Hesablanmış korrelyasiya əmsalı 0.85 olub, bu da güclü müsbət korrelyasiyanı göstərir. Yəni satış həcmi artdıqca mənfəət də eyni istiqamətdə artır. Bu əlaqə həm vizual, həm də statistik olaraq sübut olunmuşdur.
+Bu cütlüyün seçilməsinin əsas səbəbi odur ki, proqnoz və fərziyyə mərhələsində satışların mənfəəti izah edən ən mühüm amillərdən biri olduğunu vurğulamaq istəyirik. Çünki satış miqdarı artmadan mənfəətin artması mümkün deyil və profit marjası sabit qaldıqda, satışdakı dəyişikliklər mənfəətə birbaşa təsir göstərir.
+Nəticə olaraq, Total Sales və Profit arasındakı bu güclü müsbət əlaqə proqnoz modellərində əsas dəyişənlərin düzgün seçildiyini təsdiqləyir və gələcəkdə satışların proqnozlaşdırılmasının mənfəət proqnozları üçün də etibarlı baza ola biləcəyini göstərir.
+
+## Xulase
+
+Layihə çərçivəsində satış əməliyyatlarının məlumat bazası üzərində aparılan analizlər göstərdi ki, məlumatlar çox böyük həcmli və müxtəlifdir. Deskriptiv təhlil nəticəsində məlum oldu ki, satışların böyük hissəsi kiçik həcmli olsa da, bəzi iri əməliyyatlar nəticələri kəskin şəkildə yuxarı çəkir. Mənfəət dəyərləri əsasən sabit və kiçik diapazonda dəyişsə də, mənfi göstəricilər də mövcuddur ki, bu da bəzi əməliyyatlarda zərərə işarə edir.
+
+Anomaliya təhlili göstərdi ki, satış və mənfəət göstəricilərində bəzi kəskin sıçrayışlar var. Xüsusilə, cümə günləri satış və mənfəət həcmində digər günlərdən xeyli yüksəkdir. Bundan əlavə, 19 aprel tarixində qeydə alınan satışların çox böyük həcmdə olması məlumatların toplanma metodundan irəli gələn texniki anomaliya ilə bağlıdır. POS-lar üzrə təhlil isə BRAVO şəbəkəsinin digərlərindən çox böyük fərqlə öndə olduğunu göstərdi.
+
+Proqnoz və fərziyyələr mərhələsində qurulan sadə xətti reqressiya modeli sübut etdi ki, satışların həcmi və mənfəət marjası mənfəəti izah edən əsas dəyişənlərdir. Modelin yüksək R² göstəricisi (≈0.80) bu münasibətin güclü olduğunu təsdiq edir. Eyni zamanda, Total Sales və Profit arasında güclü müsbət korrelyasiya (r = 0.85) müəyyən edildi. Bu isə gələcəkdə satışların düzgün proqnozlaşdırılmasının mənfəət proqnozları üçün etibarlı baza rolunu oynaya biləcəyini göstərir.
+
+Ümumilikdə, aparılan təhlillər göstərir ki, satış və mənfəət göstəriciləri bir-biri ilə sıx bağlıdır və düzgün məlumatların istifadəsi ilə həm qısa, həm də orta müddətli proqnozlar vermək mümkündür. Nəticələr həmçinin göstərdi ki, məlumatların təmizlənməsi və anomaliyaların düzgün identifikasiyası analizin etibarlılığını təmin edən əsas şərtlərdir.
